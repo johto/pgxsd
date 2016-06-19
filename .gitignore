@@ -1,0 +1,4 @@
+*.swp
+/.deps
+/pgxsd.o
+/pgxsd.so
