@@ -28,6 +28,12 @@
 PG_MODULE_MAGIC;
 
 
+static void
+pgxsd_schema_validity_error(void *ctx, const char *msg, ...)
+{
+	elog(ERROR, "NOT VALID: %s", msg);
+}
+
 static SPIPlanPtr load_xsd_plan = NULL;
 static const char *load_xsd_sql = "SELECT schemata.document FROM pgxsd.schemata WHERE schemata.schema_location = $1";
 
@@ -36,7 +42,13 @@ pgxsd_external_entity_loader(const char *URL, const char *ID, xmlParserCtxtPtr c
 {
 	int ret;
 	Datum values[1];
-	xmlParserInputPtr doc;
+
+	SPITupleTable *tuptable;
+	TupleDesc tupdesc;
+	HeapTuple htup;
+
+	char *docstr;
+	xmlParserInputBufferPtr docbuf;
 
 	(void) ID; /* XXX ??? */
 
@@ -65,17 +77,36 @@ pgxsd_external_entity_loader(const char *URL, const char *ID, xmlParserCtxtPtr c
 	if (SPI_processed == 0)
 	{
 		/* TODO: improve this error */
-		elog(ERROR, "schema \"%s\" does not exist", URL);
+		elog(ERROR, "XML schema \"%s\" could not be located", URL);
 	}
 	else if (SPI_processed != 1)
 	{
 		/* internal error */
 		elog(ERROR, "unexpected SPI_processed value %d", (int) SPI_processed);
 	}
+	if (SPI_tuptable == NULL)
+	{
+		/* internal error */
+		elog(ERROR, "SPI_tuptable is NULL");
+	}
+	tuptable = SPI_tuptable;
+	tupdesc = tuptable->tupdesc;
+	if (tupdesc->natts != 1)
+	{
+		/* internal error */
+		elog(ERROR, "unexpected SPI TupleDesc natts %d", tupdesc->natts);
+	}
+	htup = tuptable->vals[0];
 
-	doc = xmlNewIOInputStream(ctxt, buffer, XML_CHAR_ENCODING_UTF8);
+	/*
+	 * XXX FIXME all this crap is probably leaked right now.  The libxml2 docs
+	 * aren't very clear on how exactly this is supposed to work. :-(
+	 */
 
-	return NULL;
+	/* XXX FIXME this probably doesn't work for anything other than UTF-8 */
+	docstr = SPI_getvalue(htup, tupdesc, 1);
+	docbuf = xmlParserInputBufferCreateMem(docstr, strlen(docstr), XML_CHAR_ENCODING_UTF8);
+	return xmlNewIOInputStream(ctxt, docbuf, XML_CHAR_ENCODING_UTF8);
 }
 
 
@@ -97,12 +128,6 @@ pgxsd_schema_validate(PG_FUNCTION_ARGS)
 
 	utf8string = (xmlChar *) text_to_cstring(PG_GETARG_TEXT_PP(0));
 
-	if ((ret = SPI_connect()) < 0)
-	{
-		/* internal error */
-		elog(ERROR, "SPI_connect returned %d", ret);
-	}
-
 	xmlerrcxt = pg_xml_init(PG_XML_STRICTNESS_WELLFORMED);
 	/*
 	 * Override PG's external entity loader with ours.  While we don't strictly
@@ -115,9 +140,18 @@ pgxsd_schema_validate(PG_FUNCTION_ARGS)
 
 	PG_TRY();
 	{
+		char *schemaname;
+
+		if ((ret = SPI_connect()) < 0)
+		{
+			/* internal error */
+			elog(ERROR, "SPI_connect returned %d", ret);
+		}
+
 		xmlInitParser();
 
-		sctxt = xmlSchemaNewParserCtxt("foo.xsd");
+		schemaname = text_to_cstring(PG_GETARG_TEXT_PP(1));
+		sctxt = xmlSchemaNewParserCtxt(schemaname);
 		if (sctxt == NULL || pg_xml_error_occurred(xmlerrcxt))
 			xml_ereport(xmlerrcxt, ERROR, ERRCODE_OUT_OF_MEMORY,
 						"could not allocate schema parser context");
@@ -139,6 +173,23 @@ pgxsd_schema_validate(PG_FUNCTION_ARGS)
 		if (doc == NULL || pg_xml_error_occurred(xmlerrcxt))
 			xml_ereport(xmlerrcxt, ERROR, ERRCODE_INVALID_XML_DOCUMENT,
 						"invalid XML document");
+
+		svctxt = xmlSchemaNewValidCtxt(schema);
+		if (svctxt == NULL || pg_xml_error_occurred(xmlerrcxt))
+			xml_ereport(xmlerrcxt, ERROR, ERRCODE_OUT_OF_MEMORY,
+						"could not allocate schema validation context");
+
+		/* TODO: warnings */
+		xmlSchemaSetValidErrors(svctxt,
+								pgxsd_schema_validity_error,
+								pgxsd_schema_validity_error,
+								NULL);
+
+		ret = xmlSchemaValidateDoc(svctxt, doc);
+		if (ret == -1 || pg_xml_error_occurred(xmlerrcxt))
+			xml_ereport(xmlerrcxt, ERROR, ERRCODE_OUT_OF_MEMORY,
+						"uh oh spaghetti O's");
+		elog(INFO, "ret: %d", ret);
 	}
 	PG_CATCH();
 	{
