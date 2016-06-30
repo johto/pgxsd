@@ -28,12 +28,6 @@
 PG_MODULE_MAGIC;
 
 
-static void
-pgxsd_schema_validity_error(void *ctx, const char *msg, ...)
-{
-	elog(ERROR, "NOT VALID: %s", msg);
-}
-
 static SPIPlanPtr load_xsd_plan = NULL;
 static const char *load_xsd_sql = "SELECT schemata.document FROM pgxsd.schemata WHERE schemata.schema_location = $1";
 
@@ -128,7 +122,7 @@ pgxsd_schema_validate(PG_FUNCTION_ARGS)
 
 	utf8string = (xmlChar *) text_to_cstring(PG_GETARG_TEXT_PP(0));
 
-	xmlerrcxt = pg_xml_init(PG_XML_STRICTNESS_WELLFORMED);
+	xmlerrcxt = pg_xml_init(PG_XML_STRICTNESS_ALL);
 	/*
 	 * Override PG's external entity loader with ours.  While we don't strictly
 	 * need it in order to read the input schema (since we could just use
@@ -179,17 +173,17 @@ pgxsd_schema_validate(PG_FUNCTION_ARGS)
 			xml_ereport(xmlerrcxt, ERROR, ERRCODE_OUT_OF_MEMORY,
 						"could not allocate schema validation context");
 
-		/* TODO: warnings */
-		xmlSchemaSetValidErrors(svctxt,
-								pgxsd_schema_validity_error,
-								pgxsd_schema_validity_error,
-								NULL);
-
 		ret = xmlSchemaValidateDoc(svctxt, doc);
-		if (ret == -1 || pg_xml_error_occurred(xmlerrcxt))
+		if (ret == -1)
+		{
 			xml_ereport(xmlerrcxt, ERROR, ERRCODE_OUT_OF_MEMORY,
-						"uh oh spaghetti O's");
-		elog(INFO, "ret: %d", ret);
+						"could not validate XML schema: internal error");
+		}
+		else if (ret > 0)
+		{
+			xml_ereport(xmlerrcxt, ERROR, ERRCODE_INVALID_XML_DOCUMENT,
+						"input document does not satisfy XML schema");
+		}
 	}
 	PG_CATCH();
 	{
