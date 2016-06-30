@@ -1,0 +1,19 @@
+<test>
+    <xsd schemaLocation="trivial.xsd">
+        <xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+            <xs:element name="xml">
+                <xs:complexType>
+                    <xs:sequence>
+                        <xs:element name="foo" type="xs:string"/>
+                    </xs:sequence>
+                </xs:complexType>
+            </xs:element>
+        </xs:schema>
+    </xsd>
+    <xml>
+        <foo>a simple string reporting in</foo>
+    </xml>
+    <result>
+        <success />
+    </result>
+</test>
